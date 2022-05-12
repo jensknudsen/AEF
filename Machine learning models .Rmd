@@ -1,0 +1,509 @@
+---
+title: "Mandatory Assignment 2"
+author: ""
+date: "17/4/2022"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, echo=FALSE}
+knitr::opts_chunk$set(echo = FALSE, include = FALSE, fig.align = 'center', fig.width = 6, fig.height = 3)
+```
+
+```{r Libraries}
+# Load the packages
+library(RSQLite)
+library(tidyverse)
+library(quadprog)
+library(tidyverse)
+library(lubridate)
+library(scales)
+library(frenchdata)
+library(readxl)
+library(googledrive)
+library(RSQLite)
+library(dbplyr)
+library(RPostgres)
+library(tidyquant)
+library(slider)
+library(furrr)
+library(lmtest)
+library(purrr)
+library(sandwich)
+library(kableExtra)
+library(patchwork)
+library(hrbrthemes)
+library(ggplot2)
+library(tidymodels) 
+library(furrr) 
+library(glmnet)
+library(broom)
+library(timetk)
+library(scales)
+library(keras)
+library(hardhat)
+library(ranger)
+library(rpart.plot)  # for visualizing a decision tree
+library(vip)  # for variable importance plots
+library(tictoc)
+library(ggcorrplot)
+library(visdat)
+```
+
+
+## 1
+```{r Data import, warning=FALSE, cache = TRUE}
+#Import of data set directly from file location
+tidy_finance_ML <- <- dbConnect(SQLite(), "./tidy_finance.sqlite",
+                                extended_types = TRUE
+)
+
+#Read in stock characteristics monthly data
+data <- tbl(tidy_finance_ML, "stock_characteristics_monthly") %>% 
+  select(permno, month, ret_excess, mktcap_lag, sic2, macro_dp, macro_bm, macro_ntis, macro_tbl, 
+         characteristic_mom1m, characteristic_mvel1, characteristic_mom12m, characteristic_chmom, 
+         characteristic_maxret) %>% 
+  collect()
+
+data <- data %>% #Data set is 744,088 observations and 14 columns.
+  drop_na(sic2) %>% 
+  filter(month >= "2005-01-01") %>% 
+  arrange(month, permno)
+```
+Based on figure 5 (*Empirical Asset Pricing with Machine Learning*), the 5 most (objectively) influential variables (in terms of overall model contribution) has been selected; **mom1m** (short-term momentum), **mvel1** (log market equity), **mom12m** (stock momentum), **chmom** (momentum change) and **maxret** (recent maximum return). Additionally, 4 (out of 8) macroeconomic variables have been selected; *macro_dp* (log of dividend/price), *macro_bm* (ratio of book value to market value), *macro_ntis* (net equity expansion) and *macro_tbl* (treasury-bill rates). These 4 macro variables have been selected, as each variable bring important economic interpretation: \  
+
+*i) **macro_dp** depict the level of (12-month moving sums of) dividends on the S&P 500 index relative to prices, which shows something regarding the payout ratio of the general market.\
+*ii) **macro_bm** illustrates the difference between book value and market value, which clearly illustrates investor sentiment on a company (i.e. whether investors think that book value is over/under valued).\
+*iii) **macro_ntis** is a measure of corporate issuing activity. It's the ratio of 12-month moving sums of net issues ny NYSE listed stocks divided by total end-of-year market cap of NYSE stocks. Thus, it highlights general market situation of firms (are firms expanding or not). \
+*iv) **macro_tbl** depicts the treasury bill rates of the US. This variable can be interpreted as the historic short-term risk-free rate, which obviously has been an alternative to investing in stocks.\  
+
+The following table illustrates an overview of the number of firms in each industry throughout the time-series:
+```{r, warning=FALSE, fig.align='center', cache = TRUE, include=TRUE}
+#Count number of firms in each industry
+sic2_data <- data %>%
+  group_by(sic2) %>%
+  count()
+
+#Plot of Sic2 showing number of firms in each industry
+ggplot(data = sic2_data, aes(x=sic2, y=n)) +
+         geom_bar(stat="identity")
+```
+
+The following 2 figures depict the overall development of the 4 macroeconomic variables: 
+```{r, warning=FALSE, fig.align='center', cache = TRUE, include=TRUE}
+#Plot of first 2 macro predictors (log(dividend/price), log(earning/price))
+ggplot() + 
+  geom_line(data = data, 
+            aes(x = month, y = macro_dp, 
+                color = "black", linetype = "solid")) + 
+  ggtitle("Dividend/price ratio") + theme(legend.position = "none")
+```
+
+```{r, warning=FALSE, fig.align='center',cache = TRUE, include=TRUE}
+#Plot of last 3 macro predictors (log(dividend/price), log(earning/price))
+ggplot() +
+    geom_line(data = data,
+            aes(x = month, y = macro_bm, 
+                color = "orange", linetype = "solid"))+
+
+  ggtitle("BtM value (orange), Net eq expansion (green) and Treasury bill rates") +
+  
+    geom_line(data = data,
+            aes(x = month, y = macro_ntis, 
+                color = "green", linetype = "solid")) +
+  geom_line(data = data, 
+            aes(x = month, y = macro_tbl, 
+                color = "red", linetype = "solid")) + theme(legend.position = "none")
+```
+
+## 2
+Gu, Kelly and Xiu (2020) describe an asset’s excess return as: 
+$$r_{i, t+1} = E_t(r_{i,t+1})+\epsilon_{i,t+1} \space , \space where \space E_t(r_{i,t+1}) = g(z_{i,t})$$
+The objective of Gu et. al is to isolate a representation of $E_t(r_{i,t+1})$, which is a function of predictor variables (to maximize the out-of-sample) explanatory power for realized $r_{i,t+1}$. This method has its limitations primarily in the fact that $g(\bullet)$ does not depend directly on either $i$ or $t$. Accordingly, the functional form of $g(\bullet)$ is constant across time and stocks in the data-set. By maintaining the same form over time, the model is leveraging information across the panel. This adds stability to the estimation of risk premiums across the individual stocks.\
+However, this is also a limiting factor, as standard asset pricing approach incorporates a more continual approach; either re-estimating a cross-sectional model _each_ period or an (independent) estimation of time-series model for each stock.\
+Implementing the linear factor model representation of the expected asset's returns based on _Arbitrage Pricing Theory (Russ, 1976)_ into the framework is no easy task. $z_{i,t}$ would have to be expanded, as it is currently a P-dimensional vector of predictor variables. In order to invoke a linear characteristic, the functional form of $g(\bullet)$ would have to be linear, in order to obtain any linear estimator. Additionally, this would challenge our predictor variables, as these have to be independent for the estimator to be unbiased. \
+The model itself could be written as follows using matrix notation: 
+$$R_{i,t+1}=G\beta +\epsilon$$
+Where $R_{i,t+1}$ is vector of response variables, G is our data matrix (the data contained in $z_{i,t}$), $\beta$ is a vector of the linear coefficients and $\epsilon$ is a vector of error terms. Above matrix notation is by far the simplest representation of the model, as the model is quickly difficult to depict if you expand these matrices (here illustrated with 3 coefficients and 2 predictors):
+
+\begin{equation} 
+\begin{bmatrix}             R_{1, t+1}  \\ 
+                            R_{2, t+1}  \\ 
+                            R_{3, t+1}  \\ 
+                            R_{4, t+1}  \\ 
+\end{bmatrix}=
+\begin{bmatrix} 1  & z_{1,1}  & z_{1,2}\\ 
+                            1  & z_{2,1}  & z_{2,2}\\ 
+                            1  & z_{3,1}  & z_{3,2}\\ 
+                            1  & z_{4,1}  & z_{4,2}\\ 
+\end{bmatrix} \bullet
+\begin{bmatrix}             \beta_0  \\
+                            \beta_1  \\ 
+                            \beta_3  \\ 
+\end{bmatrix} +
+\begin{bmatrix}             \epsilon_1  \\
+                            \epsilon_2  \\ 
+                            \epsilon_3  \\
+                            \epsilon_4  \\
+\end{bmatrix}
+\end{equation}
+
+
+
+## 3
+In the context of the Elastic net model, the values of our hyperparameters determines the magnitude on our penalty term which means, that a lambda value equal to 0 in the elastic net model is the OLS model. Also, a lambda value that converges towards infinity is shrinking the parameters toward zero.\
+We wish to select the specific hyperparameters for our elastic net model, that minimize the MSE-test score for the training data.
+This is the variance-bias trade off. By implementing the shrinkage, we sacrifice a little bit of bias - but in return the variance should (hopefully) decrease. \
+Cross validation is a way to select the optimal hyperparameters. When cross-validating, we are only using the training data-set. In our case we use k-fold cross validation with two folds.
+There are multiple cross validation types, such as the the k-fold cross, nested cross-validation or the time series split cross-validation.\
+We divide the training data into a validation and test data-set. Thus, we are able to use the cross validation to find the hyperparameters, that minimize the MSE.\
+
+Generally we wish to fit the model on the training data-set and make predictions with our test data-set.
+Therefore, it is generally unwise to to use the entire data-set, as we wish to predict our target variable based on unseen data.
+By doing this, we avoid letting the test data influence the training process. \
+We use 1/5 of most recent observations as our testing data set. The remaining 4/5 of the data set is our training data-set. 
+Next, we divide the training data-set into a validation and testing data set and use cross validation.
+For the random forest regression we are able to compute multiple decisions trees, with the aim of removing an possible over fit issue from individual decisions trees. With this method we are combining the forecast from many trees. \
+We furthermore exclude the dummies in the discussions tree, due to a time consuming process. Here the trade off is between transparency and performance. Two essential parts of the random forest model are the decision trees and the number of random variable used for every tree called Mtry. These are also the hyperparameters we tune in our model.
+
+
+## 4
+```{r, warning=FALSE, echo=FALSE, include=FALSE, cache=TRUE}
+# SECTION 4: 
+# First we preform a Elastic net: 
+# visualization for the different types in the dataset:
+#visdat::vis_dat(data)
+
+#
+data <- data %>%
+  mutate(sic2 = as.factor(sic2))
+
+# we will start by making our split for the training and test data: 
+data_split <- initial_time_split(data, prop = 0.8)
+data_train <- training(data_split)
+data_test <- testing(data_split)
+
+# Preprocessing with recipes 
+rec <- recipe(ret_excess ~ ., data = data_train) %>%
+  step_rm(month, permno, mktcap_lag) %>%
+  step_string2factor(all_nominal(), -all_outcomes()) %>% 
+  step_dummy(sic2, one_hot = TRUE) %>%
+  step_interact(terms = ~ contains("characteristic"):contains("macro")) %>% 
+  step_normalize(all_numeric(), -all_outcomes()) #%>%
+#step_center(ret_excess, skip = TRUE) #%>%
+#step_mutate_at(contains("_"), fn = numeric)
+rec
+
+# Try and prep and bake the training and test set
+test <- rec %>% 
+  prep(data_train) %>%
+  bake(data_test) 
+
+elas_prep <- prep(rec)
+
+# show the type fof the test data set:
+#visdat::vis_dat(test)
+
+# Make the elastic net model by tuning the penalty and the mixture (and set the engine as glmnet)
+elas_model <- linear_reg(
+  penalty = tune(),
+  mixture = tune()
+) %>%
+  set_engine("glmnet")
+
+#autoplot(elas_model)
+
+# Make a workflow with the recipe and the model:
+elas_workflow <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(elas_model)
+elas_workflow
+
+# Make the grid:
+elas_grid <- expand_grid(penalty = seq(0.000000001, 0.0001, by = 0.00001), mixture = seq(0, 1, by = 0.1))
+
+# Make the cross validation with 2 folds: 
+set.seed(123)
+new_folds <- vfold_cv(data_train, v = 2)
+new_folds
+
+# We tune the elastic model with the corresponding grid net we made above:
+elas_grid_results <- elas_workflow %>% 
+  tune_grid(
+    resamples = new_folds,
+    grid = elas_grid
+  )
+
+
+# We look at the model preformance in the aftermaths of the tuning process. 
+collect_metrics(elas_grid_results) %>%
+  filter(.metric == "rmse") %>% 
+  arrange(mean) %>%
+  head() %>% 
+  knitr::kable()
+
+# plot the preformance with respect to the rmse:
+# autoplot(elas_grid_results, metric = "rmse")
+
+
+
+
+
+```
+
+Our analysis will implement two different machine learning methods; elastic net and random forest. First, we perform elastic net machine learning for the different types in the data-set. This yields the following figure of mean squared errors:\
+
+```{r, fig.align='center', cache=TRUE, include=TRUE}
+# plot the preformance with respect to the rmse:
+autoplot(elas_grid_results, metric = "rmse")
+
+```
+
+The following table depicts the best results of the elastic net method, sorted by lowest rmse:
+```{r, cache=TRUE, include=TRUE}
+show_best(elas_grid_results, metric = "rmse") %>% knitr::kable()
+
+```
+
+```{r, warning=FALSE, cache=TRUE}
+# Fit the model with the optimal hyper parameters from the process on the training dataset:
+# It shows from left to right the number of nonzero coefficients (Df), the percent (of null) deviance explained (%dev) and the value of (Lambda)
+fitted_elas_model <- elas_workflow %>% 
+  finalize_workflow(
+    select_best(elas_grid_results, metric = "rmse")
+  ) %>% 
+  fit(data_train)
+```
+
+As we observe quite large rmse values, we want to compare the true values against the predicted values. Below table shows the rmse, mae and rsq in order to compare true value against predicted value for the elastic net method:
+```{r, cache=TRUE, include=TRUE}
+# Compares the true and predicted values (we observe a quite large rmse-value)
+fitted_elas_model %>%
+  fit(data_train) %>%
+  predict(data_test) %>%
+  metric_set(rmse, mae, rsq)(data_test$ret_excess, .pred) %>% knitr::kable()
+```
+
+Additionally, we will now look at the results of our random forest machine learning.\
+Random forest modelling is a tree-based ensemble method. The method normally performs well with default hyperparameters, but we want to tune the parameters.\
+```{r, warning=FALSE, include=FALSE, cache=TRUE}
+data <- data %>% 
+  drop_na(sic2) %>% 
+  filter(month >= "2020-09-01") %>% 
+  arrange(month, permno)
+
+
+data <- data %>%
+  mutate(sic2 = as.factor(sic2))
+
+# we will start by making our split for the training and test data: 
+data_split <- initial_time_split(data, prop = 0.8)
+data_train <- training(data_split)
+data_test <- testing(data_split)
+
+# Preprocessing with recipes 
+rec <- recipe(ret_excess ~ ., data = data_train) %>%
+  step_rm(month, permno, mktcap_lag) %>%
+  step_string2factor(all_nominal(), -all_outcomes()) %>% 
+  #step_dummy(sic2, one_hot = TRUE) %>%
+  step_interact(terms = ~ contains("characteristic"):contains("macro")) %>% 
+  step_normalize(all_numeric(), -all_outcomes()) #%>%
+#step_center(ret_excess, skip = TRUE) #%>%
+#step_mutate_at(contains("_"), fn = numeric)
+rec
+
+# Try and prep and bake the training and test set
+test <- rec %>% 
+  prep(data_train) %>%
+  bake(data_test) 
+
+# Make a random forrest model where we tune the trees and the mtry
+rf_model <- rand_forest(
+  trees = tune(),
+  mtry = tune()
+) %>%
+  set_engine("ranger") %>% 
+  set_mode("regression")
+rf_model
+
+# Make a workflow
+rf_workflow <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(rf_model)
+rf_workflow
+
+# Make a grid with 3 mtry and different numbers of trees
+rf_grid <- expand_grid(mtry = 3:5, trees = seq(700, 1300, by = 200))
+
+#Make a cross validation with 2 folds
+rf_folds <- vfold_cv(data_train, v = 2)
+rf_folds
+
+# tune the grid
+rf_grid_results <- rf_workflow %>% 
+  tune_grid(
+    resamples = rf_folds,
+    grid = rf_grid
+  )
+
+# Collect the results:
+collect_metrics(rf_grid_results) %>%
+  filter(.metric == "rmse") %>% 
+  arrange(mean) %>%
+  head() %>% 
+  knitr::kable()
+
+#plot the results: 
+autoplot(rf_grid_results, metric = "rmse")
+
+#show the best result
+show_best(rf_grid_results, metric = "rmse") %>% knitr::kable()
+
+# another way to show the best result:
+select_by_pct_loss(rf_grid_results, metric = "rmse", limit = 5, trees) %>%
+  knitr::kable()
+
+# fit the model with the training data
+fitted_rf_model <- rf_workflow %>% 
+  finalize_workflow(
+    select_best(rf_grid_results, metric = "rmse")
+  ) %>% 
+  fit(data_train)
+
+
+#test with the test data and compare:
+fitted_rf_model %>%
+  predict(data_test) %>%
+  metric_set(rmse, mae, rsq)(data_test$ret_excess, .pred)
+```
+
+Below table depicts the number of trees for 6 different paths in the model. The variable __mtry__ is the number of predictors, that are sampled at splits in the tree-based model:  
+
+```{r, cache=TRUE, include=TRUE, cache=TRUE}
+# Collect the results:
+collect_metrics(rf_grid_results) %>%
+  filter(.metric == "rmse") %>% 
+  arrange(mean) %>%
+  head() %>% 
+  knitr::kable()
+
+```
+
+For graphical representation, the following figure plots the results from above table: 
+```{r, include=TRUE}
+#plot the results: 
+autoplot(rf_grid_results, metric = "rmse")
+```
+
+By filtering the grid results by their rmse, we can find the very best results of the random forest method to be:
+```{r, cache=TRUE, include=TRUE}
+#show the best result
+show_best(rf_grid_results, metric = "rmse") %>% knitr::kable()
+```
+
+```{r, cache=TRUE, include=FALSE}
+
+# another way to show the best result:
+select_by_pct_loss(rf_grid_results, metric = "rmse", limit = 5, trees) %>%
+  knitr::kable()
+
+# fit the model with the training data
+fitted_rf_model <- rf_workflow %>% 
+  finalize_workflow(
+    select_best(rf_grid_results, metric = "rmse")
+  ) %>% 
+  fit(data_train)
+
+```
+
+```{r, cache=TRUE}
+#test with the test data and compare:
+fitted_rf_model %>%
+  predict(data_test) %>%
+  metric_set(rmse, mae, rsq)(data_test$ret_excess, .pred) %>% knitr::kable()
+```
+
+## 5
+Using our two models based on elastic net and random forest, that has been tuned and fitted, we can predict the return of the assets in our data-set. The returns are predicted for the years 2017-2020, as these have been excluded from the training data-set in our machine learning methods. \
+As pr. the assignment, the stocks are sorted into 10 different deciles based on their predicted returns. Decile number 10 will contain the stocks with the highest predicted return and decile number 1 will contain the stocks, that have the lowest predicted return. These deciles are computed on a monthly basis (i.e. the deciles are continually changing over time).\
+In order to not over (-or under) represent a company's predicted returns, each datapoint will be value-weighted with the lagged market cap. This ensures that we have value-weighted portfolios. \
+Finally, we create a zero net investment strategy, that goes long (i.e. buys) the decile 10 portfolio, which is funded by going short (i.e. selling) decile number 1. This investment strategy is a zero net investment, as we do not need to invest any of our own funds, in order to fund this portfolio. In the case that this strategy has a positive return, we can thus achieve a risk-free return. 
+
+```{r, warning=FALSE, echo=FALSE, include=FALSE, cache=TRUE}
+#Generate predictions for out of sample data for both elastic net and random forest:
+out_of_sample_data <- data_train 
+
+elasticnet_predictions <- fitted_elas_model %>% predict(out_of_sample_data)
+rf_predictions <- fitted_rf_model %>% predict(out_of_sample_data)
+
+final_df <- out_of_sample_data %>%
+  mutate(elasticnet_pred = unlist(elasticnet_predictions),
+         randomforest_pred = unlist(rf_predictions))
+
+```
+
+```{r, cache=TRUE}
+
+#Generating portfolios in deciles
+assign_portfolio <- function(data, var, n_portfolios) {
+  breakpoints <- data %>%
+    summarize(breakpoint = quantile({{ var }},
+                                    probs = seq(0, 1, length.out = n_portfolios + 1),
+                                    na.rm = TRUE
+    )) %>%
+    pull(breakpoint) %>%
+    as.numeric()
+  
+  
+  data %>%
+    mutate(portfolio = base::findInterval({{ var }},
+                                          breakpoints,
+                                          all.inside = TRUE
+    )) %>%
+    pull(portfolio)
+}
+
+create_longshort  <- function(df, prediction, name) {
+  value_portfolios <- df %>%
+    group_by(month) %>%
+    mutate(
+      portfolio = assign_portfolio(
+        data = cur_data(),
+        var = {{prediction }},
+        n_portfolios = 10
+      )) %>%
+    group_by(month, portfolio) %>%
+    summarize(
+      ret = weighted.mean(ret_excess, mktcap_lag),
+      .groups = "drop"
+    )
+  
+  ml_longshort <- value_portfolios %>%
+    ungroup() %>%
+    mutate(portfolio = case_when(
+      portfolio == max(as.numeric(portfolio)) ~ "high",
+      portfolio == min(as.numeric(portfolio)) ~ "low"
+    )) %>%
+    filter(portfolio %in% c("low", "high")) %>%
+    pivot_wider(month, names_from = portfolio, values_from = ret) %>%
+    mutate(long_short = high - low) %>%
+    group_by(year = year(month)) %>%
+    summarize(
+      low = prod(1 + low)-1,
+      high = prod(1 + high)-1,
+      long_short = prod(1 + long_short)-1
+    ) 
+  return(ml_longshort)
+}
+
+```
+The results of these two zero net investment strategies are depicted in below table:
+
+```{r, include=TRUE}
+#Portfolio returns
+elasticnet_longshort <-create_longshort(final_df, elasticnet_pred, Elasticnet) %>% knitr::kable()
+randomforest_longshort <- create_longshort(final_df, randomforest_pred, RandomForest) %>% knitr::kable()
+```
+
+
