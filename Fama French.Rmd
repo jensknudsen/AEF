@@ -1,0 +1,541 @@
+---
+title: ""
+author: ''
+date: ""
+output:
+  pdf_document: default
+  html_document: default
+  word_document: default
+---
+
+```{r Setup, echo=FALSE}
+knitr::opts_chunk$set(echo = FALSE, include = FALSE, fig.align = 'center', fig.width = 6, fig.height = 3)
+```
+
+```{r Libraries}
+# Load the packages
+library(RSQLite)
+library(tidyverse)
+library(quadprog)
+library(lubridate)
+library(scales)
+library(frenchdata)
+library(readxl)
+library(googledrive)
+library(RSQLite)
+library(dbplyr)
+library(dplyr)
+library(RPostgres)
+library(tidyquant)
+library(slider)
+library(furrr)
+library(lmtest)
+library(purrr)
+library(sandwich)
+library(kableExtra)
+library(patchwork)
+library(hrbrthemes)
+library(ggplot2)
+library(tidymodels) 
+library(furrr) 
+library(glmnet)
+library(broom)
+library(timetk)
+library(scales)
+library(keras)
+library(hardhat)
+library(ranger)
+library(rpart.plot)  # for visualizing a decision tree
+library(vip)  # for variable importance plots
+library(tictoc)
+library(ggcorrplot)
+library(visdat)
+library(quadprog) 
+library(alabama)
+library(memisc)
+library(pander)
+library(splitstackshape)
+library(corpcor) # package to create closest semi definite matrix 
+```
+
+```{r Data import and sort for Exercise 1 and 2, cache=TRUE}
+# Read in the CSV file:
+FF <- read.csv(file = '/Users/Meine/OneDrive/Skrivebord/AEF/data/data_exam2022.csv')
+
+
+FF$month <- as.character(FF$month)
+
+FF1 <- FF %>%
+  group_by(permno) %>% 
+  filter(month <= ("2015-12-01"))
+
+FF2 <- FF %>%
+  group_by(permno) %>%
+  filter(month >= ("2016-01-01"))
+```
+
+```{r Ex.1 Estimating alpha and 3x beta for each stock, cache=TRUE}
+# Find the estimates for each of the variables including alpha:
+
+x <- unique(FF1$permno)
+alpha = c()
+beta_1 = c()
+beta_2 = c()
+beta_3 = c()
+
+for (i in x) {
+  estimation <- lm(ret_excess ~ mkt_excess + smb + hml,
+                   data = FF1 %>%
+                     filter (permno==i)
+  )
+  alpha <- append(alpha, estimation[[1]][[1]])
+  beta_1 <- append(beta_1, estimation[[1]][[2]])
+  beta_2 <- append(beta_2, estimation[[1]][[3]])
+  beta_3 <- append(beta_3, estimation[[1]][[4]])
+}
+
+#Collect the data to display in a table
+
+table1_table <- rbind(alpha, beta_1, beta_2, beta_3) 
+
+rownames(table1_table) <- c('alpha','beta M','beta SMB', 'beta HML')
+colnames(table1_table) <- c('10026', '10032', '10044', '10104', '10200', '10232', '10252','10397')
+```
+
+
+**Exam, part 2**\
+**1.1**) We consider the FF-3 Factor model including three factors; market risk (M), the outperfomance of small-cap's return relative to large-cap (SMB), and the outperformance of high book-to-market value companies vs. low book-to-market value companies (HML).
+We derive the values $\alpha_i$ and $\beta^k_i$ for every stock, where $\beta^M$, $\beta^{SMB}$ and $\beta^{HML}$ represent factor betas of stock $i$ that measure the sensitivity of stock $i$ wrt. to M, SMB or HML. $\alpha$ is a constant, that is a direct expression of the assets ability to beat the market returns relative to its risk. If $\alpha$ is positive (negative) for a given asset, the asset has outperformed (underperformed) comparable assets in the market - relative to its risk. By utilizing a multi-linear regression, the FF-3 Factor model estimates for $\alpha_i$ and $\beta^k_i$ are computed. Table 1 depicts these values:
+
+```{r Ex.1 Table 1, cache=TRUE, include=TRUE}
+table1_table %>% knitr::kable(digits=3,caption = "Alpha- and 3-factor Beta values for each stock") %>%
+  kable_styling(latex_options = "HOLD_position") 
+```
+
+**1.2**) The model implied gross excess return $\hat\mu^{FF}$ is: $$r_{i,t}= \bigg(\underbrace{ \hat\alpha_i +\hat\beta_i^M r_{M,t} + \hat\beta_i^{SMB} r_{SMB, t} + \hat\beta_i^{HML} r_{HML, t}}_{=\hat\mu^{FF}}\bigg) + \hat\epsilon_{i,t}$$. It is derived by using the results from our multi-linear regression and finding average values for each of the 3 different $\hat\beta_i^k$ (and adding the respective $\hat\alpha_i$ value), and again finding the average for each of the 8 stocks. We derive $\hat\mu^{FF} = (0.015, \space 0.012, \space 0.017, \space 0.005, \space 0.031, \space 0.009, \space 0.011, \space 0.011)$. In order to derive the model-implied variance covariance matrix $\hat\Sigma^{FF}$, we create a $t\times i$ matrix, in which each item $t, i$ is the return at $t$ of stock $i$. Thus, we can simply take advantage of the *cov()* function to derive $\hat\Sigma^{FF}$.
+```{r, Ex.1 computing mu and sigma}
+# We wish to show the fitted results for the estimated alpha and beta values:
+# First we run the model though with all of our given r-values with our model estimates
+
+x <- unique(FF1$permno)
+models <- c()
+for (i in x) {
+  estimation <- lm(ret_excess ~ mkt_excess + smb + hml,
+                   data = FF1 %>%
+                     filter (permno==i)
+  )
+  models <- append(models, estimation$fitted)
+}
+
+# We store this for each of the stocks:
+n1 <- models[0:length(unique(FF1$month))]
+n2 <- models[((length(unique(FF1$month))*1)+1):(length(unique(FF1$month))*2)]
+n3 <- models[((length(unique(FF1$month))*2)+1):(length(unique(FF1$month))*3)]
+n4 <- models[((length(unique(FF1$month))*3)+1):(length(unique(FF1$month))*4)]
+n5 <- models[((length(unique(FF1$month))*4)+1):(length(unique(FF1$month))*5)]
+n6 <- models[((length(unique(FF1$month))*5)+1):(length(unique(FF1$month))*6)]
+n7 <- models[((length(unique(FF1$month))*6)+1):(length(unique(FF1$month))*7)]
+n8 <- models[((length(unique(FF1$month))*7)+1):(length(unique(FF1$month))*8)]
+
+# Make a code to get this into a list: 
+count_month <- length(unique(FF1$month))
+new_month <- seq(1, count_month, by=1)
+n1_list <- c()
+n2_list <- c()
+n3_list <- c()
+n4_list <- c()
+n5_list <- c()
+n6_list <- c()
+n7_list <- c()
+n8_list <- c()
+for (i in new_month) {
+  n1_list <- append(n1_list, n1[[i]])
+}
+for (i in new_month) {
+  n2_list <- append(n2_list, n2[[i]])
+}
+for (i in new_month) {
+  n3_list <- append(n3_list, n3[[i]])
+}
+for (i in new_month) {
+  n4_list <- append(n4_list, n4[[i]])
+}
+for (i in new_month) {
+  n5_list <- append(n5_list, n5[[i]])
+}
+for (i in new_month) {
+  n6_list <- append(n6_list, n6[[i]])
+}
+for (i in new_month) {
+  n7_list <- append(n7_list, n7[[i]])
+}
+for (i in new_month) {
+  n8_list <- append(n8_list, n8[[i]])
+}
+
+# We make a dataframe (with respect to time)
+df <- data.frame ('10026' = n1_list,
+                  '10032' = n2_list,
+                  '10044' = n3_list,
+                  '10104' = n4_list,
+                  '10200' = n5_list,
+                  '10232' = n6_list,
+                  '10252' = n7_list,
+                  '10397' = n8_list,
+                  check.names = FALSE
+                  )
+#calculating my:
+mu <-colMeans(df)
+mu_average <- mean(colMeans(df))
+
+#calculating the covariance matrix:
+sigma <- cov(df)
+```
+
+```{r Ex. 1 Sigma hat not displayed in report}
+#$$\small \hat\Sigma^{FF} = 
+#\left(\begin{array}{rrrrrrrrrr}
+#0.0013 & 0.0300 & 0.0010 & 0.0017 & 0.0024 & 0.0008 & 0.0017 & 0.0013 \\
+#0.0030 & 0.0087 & 0.0025 & 0.0058 & 0.0088 & 0.0016 & 0.0036 & 0.0033 \\
+#0.0010 & 0.0025 & 0.0009 & 0.0016 & 0.0017 & 0.0005 & 0.0013 & 0.0011 \\
+#0.0018 & 0.0058 & 0.0016 & 0.0043 & 0.0068 & 0.0008 & 0.0019 & 0.0020 \\
+#0.0024 & 0.0088 & 0.0017 & 0.0068 & 0.0161 & 0.0011 & 0.0016 & 0.0024 \\
+#0.0008 & 0.0016 & 0.0005 & 0.0008 & 0.0011 & 0.0005 & 0.0011 & 0.0008 \\
+#0.0017 & 0.0036 & 0.0013 & 0.0019 & 0.0016 & 0.0011 & 0.0026 & 0.0018 \\
+#0.0013 & 0.0033 & 0.0011 & 0.0020 & 0.0024 & 0.0007 & 0.0018 & 0.0014
+#\end{array}\right) $$
+```
+
+The determining factor that decides the correlation between returns of the 8 stocks, is the three FF-factors. The covariances between the stocks' returns are determined entirely by the variances of $x_{i,t}$ and $\hat\beta_i$. Here, as pr. our assumptions, the residuals do not have any impact.
+
+**1.3**) Note, that the estimated variance covariance matrix $\hat\Sigma^{FF}$ is singular. Thus, $(\hat\Sigma^{FF})^{-1}$ is not defined. To circumvent this, we compute the nearest symmetric positive semidefinite matrix using the '*corpcor*' package in R. The package generates the nearest symmetric positive semi definite matrix according to the method of Schäfer & Strimmer (2005)^[Schäfer, Juliane and Strimmer, Korbinian. "*A Shrinkage Approach to Large-Scale Covariance Matrix Estimation and Implications for Functional Genomics*", Statistical Applications in Genetics and Molecular Biology, vol. 4, no. 1, 2005.]. 
+Initially,  we explored two separate options: *i*) the method of Kadan, Liu & Tang (2018)^[Kadan, Ohad and Liu, Fang and Tang, Xiaoxiao, "*Recovering Implied Volatility*" (October 1, 2019). 29th Annual Conference on Financial Economics & Accounting 2018, Available at SSRN: https://ssrn.com/abstract=2969089], that exploits the fundamental factor relation to estimate the implied variance and covariance matrix for N assets and K factors (specifically, equation 5 of the paper), and *ii*) Using Ledoit-Wolf linear shrinkage. We did not find a way to implement method *i*), despite this probably being the optimal solution, and method *ii*) is only used in large dimensions $N>T$, which is not the case in our sample. The optimal MVP weights are displayed below:
+```{r Ex.1 MVP weights + data for table 2}
+#Inspect the sigma covariance matrix to observe it 'det' is (almost) zero: 
+det(sigma)
+
+# Furthermore it is not possible to take the invers of the matrix:
+#solve(sigma)
+
+# we therefore make an approximation of the matrix with the 'corpcor' library: 
+#inspect the library 
+#help("make.positive.definite")
+
+# compute the new Sigma:
+Sigma <- make.positive.definite(sigma)
+
+#compute mu as a row vector: 
+mu <- colMeans(df)
+
+
+# Optimal weights with the closed form solution. 
+compute_efficient_weight <- function(Sigma,
+                                     mu,
+                                     gamma = 4){ 
+
+  iota <- rep(1, ncol(Sigma))
+  
+  Sigma_inverse <- solve(Sigma)
+  
+  w_mvp <- Sigma_inverse %*% iota
+  w_mvp <- as.vector(w_mvp / sum(w_mvp))
+  w_opt <- w_mvp  + 1/gamma * (Sigma_inverse - 1 / sum(Sigma_inverse) * Sigma_inverse %*% iota %*% t(iota) %*% Sigma_inverse) %*% mu
+  return(as.vector(w_opt))
+}
+
+cew <- compute_efficient_weight(Sigma, mu)
+sum(cew) # this sums to one
+
+table2 <- rbind(cew) 
+
+
+colnames(table2) <- c('10026', '10032', '10044', '10104', '10200', '10232', '10252','10397')
+
+# changing row names of data frame
+rownames(table2) <- c("Weight")
+```
+
+```{r Ex.1 Table 2: display MVP weights, cache=TRUE, include=TRUE}
+
+table2 %>% knitr::kable(digits=0,caption = "Implied MVP weights for each permno (gamma = 4)") %>%
+  kable_styling(latex_options="scale_down") %>% kable_styling(latex_options = "HOLD_position")
+
+```
+Later on, as our implied MVP weights are unrealistic in an economic sense (such high leverage is impossible), we will compute MVP weights using the *alabama()* approach, to obtain MVP weights that carry some sort of economic interpretation. Thus, we are able to compare between the 4 different portfolio strategies in Problem 3. By implementing the *alabama()* package, we compute the MVP weights subject to the T-constraint^[https://en.wikipedia.org/wiki/Regulation_T], which requires the absolute sum of portfolio weights to be smaller than $1.5$.  
+
+**2.1**) We consider the paper '*The paper Parametric portfolio policies: Exploiting characteristics in the cross-section of equity returns*' by Brandt et. al^[Brandt, Michael W. and Santa-Clara, Pedro and Valkanov, Rossen, '*Parametric Portfolio Policies: Exploiting Characteristics in the Cross-Section of Equity Returns*', The Review of Financial Studies, Volume 22, Issue 9, September 2009, Pages 3411–3447] which proposes a parametric procedure to compute optimal portfolio weights. $\theta'\hat{x}_{i_t}$ represents the deviation of the optimal portfolio weights from the benchmark weights ($\bar{\omega}$), where $\hat{x}_{i,t}$ are the stock characteristics ($\theta$ includes the relative deviation from the benchmark pr. $x_i$). In this application $\theta$ includes three elements and, thus, the relative deviation from the benchmark can be due to the stocks': *beta*-, *size*- and *bm* values. $\theta$ is constant across $i$ and $t$. The former implies that the optimal weights only depend on the stocks' characteristics and not its historical returns. The latter implies, that the coefficients that maximize the investor’s conditional expected utility, at a given date, are the same for all dates and therefore also maximize the investor’s unconditional expected utility. 
+Brandt et. al consider the investor's problem, where you choose $\omega_{i,t}$ to maximize the expected the utility of the portfolio return:
+$$\max _{w} E_{t}\left(u\left(r_{p, t+1}\right)\right)=E_{t}\left[u\left(\sum_{i=1}^{N_{t}} w_{i, t} r_{i, t+1}\right)\right]$$
+The fact that $\theta$ is constant across assets and time means that we can rewrite the conditional optimization wrt. the $\omega_{i,t}$ function above, to an unconditional optimization problem wrt. the coefficients $\theta$. Thus, $\theta$ can be estimated by maximizing the objective function based on our sample:
+$$ \max _{\theta} \mathrm{E}\left[u\left(r_{p, t+1}\right)\right]=\mathrm{E}\left[u\left(\sum_{i=1}^{N_{t}}\left(\bar{w}_{i, t}+\frac{1}{N_{t}} \theta^{\top} \hat{x}_{i, t}\right) r_{i, t+1}\right)\right] \Leftrightarrow \mathrm{E}\left[u\left(r_{p, t+1}\right)\right]= \frac{1}{T}\sum_{t=0}^{T-1}u\left(\sum_{i=1}^{N_{t}}\left(\bar{w}_{i, t}+\frac{1}{N_{t}} \theta^{\top} \hat{x}_{i, t}\right) r_{i, t+1}\right) $$
+**2.2**) Brandt, Santa-Clara and Valkanov point at several benefits of the parametrizing portfolio. First and foremost, this procedure avoids the step of modeling the means, variances and covariances of the stocks considered. This step was a necessity in Problem 1 in order to compute the MVE weights. Instead, this method only focuses on the portfolio weights, where the relation between the characteristics and expected return, variances, and covariances is implicitly included in the optimization, as they all affect the distribution of the optimized portfolio's returns - and therefore the investor's expected utility.
+
+In the two-step procedure that involved estimating the moments of the return distribution, we were forced to specify a $N_t$ dimensional vector of expected returns as well as $N_t(N_t+1)/2$ free elements of the covariance matrix. Contrarily, in this procedure our focus is solely on the vector $\theta$. In general, the parametrizing portfolio is more robust, due to a numerically robust formulation, and the fact that it only consists of (in our case) one unknown parameter $\theta$. Furthermore, this ensures reduced risk of in-sample overfitting and tends to not produce extreme value results - like we saw in our computed weights in P.1. Conclusively, the parametrizing approach should (in general) combat large portfolio dimensions more effectively than the approach used in Problem 1.
+
+Direct weight parametrization relies on coefficients that are found by optimizing the investor’s average utility of the portfolio’s return over a given sample period. These coefficients are constant over time, and do not depend on historical performance of the stocks considered. A potential disadvantage is the models ability to actually capture *all* aspects of the joint distribution of returns, which is implied by the model.
+```{r Ex.2 Ex.2 Function (loop) to compute optimal theta vector}
+# change the dataframes column names:
+FF1_new <- FF1 %>% 
+  transmute(permno,month,ret_excess, mkt_excess,smb,hml,betalag = beta,sizelag = size,bmlag = bm)
+
+# making a new n variable that counts the number of stocks:
+FF1_new <- FF1_new %>%
+  group_by(month) %>%
+  mutate(
+    n = n()
+  ) %>%
+  ungroup()
+
+# Defining default settings:
+n_parameters <- sum(grepl("lag", colnames(FF1_new)))
+theta <- rep(1.5, n_parameters)
+names(theta) <- colnames(FF1_new)[grepl("lag", colnames(FF1_new))]
+
+#Function that connects theta with computation of weights
+# making a function that takes theta as input: 
+optimal <- function(theta){ # Making a function called div.ratio
+  count_month <- length(unique(FF1_new$month)) # display the total amount of months
+  new_month <- seq(1, count_month, by=1) # Make a list that can loop though all of the months
+  x <- unique(FF1$permno) # make a list containing unique permno-numbers
+  listen <- c() # make a list to contain all of the gross portfolio return (including the weight_pp variable)
+  for (y in x) { # making a for loop 
+    for (i in new_month) { # making a loop inside another loop
+      vec <- c(FF1_new$betalag[FF1_new$permno==y][i],FF1_new$sizelag[FF1_new$permno==y][i],FF1_new$bmlag[FF1_new$permno==y][i]) # Defining the 3 dimensional vector for the stocks characteristics for each permno in each month
+      R <- FF1_new$ret_excess[FF1_new$permno==y][i] %*% ((1/8) + (1/8)*t(theta) %*% vec) # Calculating the gross portfolio return for a given theta value (not defined)
+      listen <- append(listen, R) # Append this result to the list
+    }
+  }
+  # Now we take all of the estimated values for each month and divide it into lists for each specific stock (we get 8 list, one for each stock)
+  n1 <- listen[0:length(unique(FF1$month))]
+  n2 <- listen[((length(unique(FF1$month))*1)+1):(length(unique(FF1$month))*2)]
+  n3 <- listen[((length(unique(FF1$month))*2)+1):(length(unique(FF1$month))*3)]
+  n4 <- listen[((length(unique(FF1$month))*3)+1):(length(unique(FF1$month))*4)]
+  n5 <- listen[((length(unique(FF1$month))*4)+1):(length(unique(FF1$month))*5)]
+  n6 <- listen[((length(unique(FF1$month))*5)+1):(length(unique(FF1$month))*6)]
+  n7 <- listen[((length(unique(FF1$month))*6)+1):(length(unique(FF1$month))*7)]
+  n8 <- listen[((length(unique(FF1$month))*7)+1):(length(unique(FF1$month))*8)]
+  
+  ny_listen <- c() # Make a new list 
+  for (i in new_month) { # Make a for loop
+    resul <- 1+ n1[i]+n2[i]+n3[i]+n4[i]+n5[i]+n6[i]+n7[i]+n8[i] #summing the results for each time period for all of the stocks and adding 1 (as given in definition)
+    ny_listen <- append(ny_listen, resul) #Append this specific values for each month to the list
+  }
+  
+  opt <- mean(ny_listen) - 2*var(ny_listen) # Finally we insert this into the object we wish to optimize (given as the certainty equivalent function)
+  return(-opt) # return the negative value of the opt
+}
+
+# Now we are able to optimize the function
+out <- optim(par     = theta,  # the parameter we wish to tune for 
+             fn      = optimal, # the function above
+             method  = "L-BFGS-B") # method we use to optimize 
+
+# we print out the estimates of theta:
+out$par
+
+```
+
+**2.3**) The computed results of $\hat\theta$ are $\hat\theta=(-0.600, \space -0.647, \space \space0.568)$ wrt. to *beta*, *size* and *bm*, respectively. The values of $\hat\theta$ are easy to interpret. Expected utility increases by tilting weights from the value-weighted portfolio towards lower beta value stocks (negative coefficient for *beta*), towards smaller stocks (negative coefficient for *size*), and towards higher relative book-to-market stocks (positive coefficient for *bm*). Whether the signs of $\hat\theta$ are intuitive or not depends on the distribution in the benchmark portfolio. Since we have not analyzed the exposure of the equal-weights to the three $x_{i,t}$ stock characteristics, we can not interpret whether the signs are intuitive in an economic sense or not. However, as an example, we would expect *beta* and return to have a positive correlation, since a higher *beta* value for a stock, implies a greater risk exposure. Based on this, it could look like the negative coefficient for *beta* does not live up to our economic expectation. 
+
+```{r Ex.2 Display optimal theta, cache=TRUE, include=TRUE}
+#out$par %>% knitr::kable(digits=3,caption = "Optimal theta vector given CE (gamma = 4)") %>%
+#  kable_styling(latex_options = "HOLD_position")
+```
+
+```{r Ex.2 compute optimal weights given optimal theta}
+# We make the w_bar as a vector 
+w_bar <- matrix(rep(1/8, 8),
+                nrow = 1,
+                ncol = 8)
+
+beta_1 <- out$par[1]
+size_1 <- out$par[2]
+bm_1 <- out$par[3]
+
+# Here we make the vector theta
+# Here we just transpose the matrix from the start
+theta <- cbind(rep(beta_1[[1]], 1), rep(size_1[[1]], 1),
+               rep(bm_1[[1]], 1))
+
+# we make a for loop that take every characteristic for every stock 2015-12-01 and display this as a vector 
+beta_list <- c()
+size_list <- c()
+bm_list <- c()
+x <- unique(FF1$permno) 
+for (i in x) {
+  beta <- FF1_new$betalag[FF1_new$permno==i & FF1_new$month==("2015-12-01")][1]
+  beta_list <- append(beta_list, beta)
+  size <- FF1_new$sizelag[FF1_new$permno==i & FF1_new$month==("2015-12-01")][1]
+  size_list <- append(size_list, size)
+  bm <- FF1_new$bmlag[FF1_new$permno==i & FF1_new$month==("2015-12-01")][1]
+  bm_list <- append(bm_list, bm)
+}
+# displaying this as a vector
+data <- list(beta_list, size_list, bm_list)
+x_cha <- matrix(unlist(data), ncol = 8, nrow = 3, byrow = TRUE)
+x_cha
+
+# We compute the optimal weights:
+optimal_weights_pp <- w_bar + (1/8)* theta %*% x_cha
+optimal_weights_pp
+
+#Setup table data
+weightstable <- optimal_weights_pp 
+
+rownames(weightstable) <- c('Optimal weight')
+colnames(weightstable) <- c('10026', '10032', '10044', '10104', '10200', '10232', '10252','10397')
+
+```
+**2.4**) Based on $\hat\theta$ and $x_{i,t}$, optimal weights $\omega^{FF}$ are computed by parametrizing the portfolio weight of each stock as a function of the firm's characteristics. Then, coefficients of the portfolio policy are estimated by maximizing the utility, that would have been obtained by implementing the policy over the sample period. Results are reported in table X: 
+
+
+```{r Ex.2 Report optimal pp weights, cache=TRUE, include=TRUE}
+
+weightstable %>% knitr::kable(digits=3,caption = "Optimal PP weights") %>%
+  kable_styling(latex_options = "HOLD_position") #kable_styling(latex_options="scale_down") %>%
+
+```
+
+```{r Efficient portfolio weights based on sample estimates}
+# Subset the data we wish to use
+newnew_data <- subset(FF1, select=c("month", "permno", "ret_excess"))
+
+# turn the data into different dimensions
+new_data <- newnew_data %>%
+  pivot_wider(
+    names_from = permno,
+    values_from = ret_excess
+  ) 
+# choose the relevant subset:
+new_data <- subset(new_data, select=c('10026', '10032', '10044', '10104', '10200', '10232', '10252','10397')) 
+
+#Compute the sigma
+Sigma_eff <- cov(new_data)
+
+#Compute the mu values
+mu_eff <- colMeans(new_data)
+
+# define the efficient weights as a function with gamma equal to 4: 
+compute_efficient_weight <- function(Sigma,
+                                     mu,
+                                     gamma = 4, 
+                                     lambda = 0){ 
+  
+  iota <- rep(1, ncol(Sigma))
+  
+  Sigma_inverse <- solve(Sigma)
+  
+  w_mvp <- Sigma_inverse %*% iota
+  w_mvp <- as.vector(w_mvp / sum(w_mvp))
+  w_opt <- w_mvp  + 1/gamma * (Sigma_inverse - 1 / sum(Sigma_inverse) * Sigma_inverse %*% iota %*% t(iota) %*% Sigma_inverse) %*% mu
+  return(as.vector(w_opt))
+}
+
+# Run the efficient weights function with sigma and mu: 
+weights_eff <- compute_efficient_weight(Sigma_eff,mu_eff)
+weights_eff
+
+# Compute the naive weighted portfolio:
+weight_naive <- c(rep(1/8, 8))
+weight_naive <- matrix(weight_naive,nrow=1,ncol=8,byrow=TRUE)
+weight_naive
+
+#Create extra row to display permno in table
+MatrixA <- matrix(data = 0:0, nrow = 1, ncol = 8) 
+
+MatrixB <- rbind(weights_eff)
+colnames(MatrixB) <- c('10026', '10032', '10044', '10104', '10200', '10232', '10252','10397')
+rownames(MatrixB) <- c('Efficient weight')
+```
+
+**3.1**) Based on the in-sample data, efficient portfolio weights based on sample estimates are computed *once* by following the example code provided in chapter 11.4. Equal-weights are given by $1/N = 1/8$. As previously mentioned, we choose to incorporate the performance of MVP weights computed under a T-regularization constraint with the *alabama()* package, as the MVP weights computed in Problem 1 carry no economic interpretation. Annualized characteristics for each of the 4 (5) portfolio strategies are presented in table 4.    
+
+```{r Ex. 3 Table display efficient weights, cache=TRUE, include=TRUE}
+#MatrixB %>% knitr::kable(digits=3,caption = "Efficient weights") %>%
+#  kable_styling(latex_options = "HOLD_position") #kable_styling(latex_options="scale_down") %>%
+```
+
+```{r Ex. 3 Sharpe ratios for each of the 4 (5) portfolio strategies (fixed weights)}
+# Naive
+weight_naive
+
+# Efficient
+weights_eff <- matrix(weights_eff,nrow=1,ncol=8,byrow=TRUE)
+weights_eff
+
+# from excercise 1
+mve_port <- matrix(cew,nrow=1,ncol=8,byrow=TRUE)
+mve_port
+
+# from excercise 2
+optimal_weights_pp
+
+# compute the return matrix:
+ret_mtrx <- matrix(FF2$ret_excess, ncol = 60, nrow = 8, byrow=TRUE)
+ret_mtrx
+
+#Alabama weights
+initial_weights <- 1 / 8 * rep(1, 8)
+objective <- function(w, gamma = 4) -t(w) %*% mu + gamma / 2 * t(w)%*%Sigma%*%w
+inequality_constraints <- function(w, reg_t = 1.5) return(reg_t - sum(abs(w)))
+equality_constraints <- function(w) return(sum(w) - 1)
+
+w_reg_t <- constrOptim.nl(
+  par = initial_weights,
+  hin = inequality_constraints,
+  fn = objective, 
+  heq = equality_constraints,
+  control.outer = list(trace = FALSE))
+alabama_weights <- w_reg_t$par
+
+#Prepare alabama_port to use for computing characteristics
+alabama_port <- matrix(alabama_weights,nrow=1,ncol=8,byrow=TRUE)
+
+# compute the returns for each time in the data set: 
+naive_returns <- weight_naive %*% ret_mtrx
+efficient_returns <- weights_eff %*% ret_mtrx
+mve_returns <- mve_port %*% ret_mtrx
+optimal_returns <- optimal_weights_pp %*% ret_mtrx
+alabama_returns <- alabama_port %*% ret_mtrx
+
+# compute the portfolio returns for each portfolio:
+mean_naive_returns <- 12* mean(100*naive_returns)
+mean_efficient_returns <-12*mean(100*efficient_returns)
+mean_mve_returns <-12*mean(100*mve_returns)
+mean_optimal_returns <-12*mean(100*optimal_returns)
+mean_alabama_returns <-12*mean(100*alabama_returns)
+
+# Calculating the standard diviation for each portfolio:
+sd_naive_returns <- sqrt(12)*sd(100*naive_returns)
+sd_efficient_returns <-sqrt(12)*sd(100*efficient_returns)
+sd_mve_returns <-sqrt(12)*sd(100*mve_returns)
+sd_optimal_returns <- sqrt(12)*sd(100*optimal_returns)
+sd_alabama_returns <- sqrt(12)*sd(100*alabama_returns)
+
+# Calculating the Sharpe ratio
+SR_naive_returns <- mean_naive_returns/sd_naive_returns
+SR_efficient_returns <- mean_efficient_returns/sd_efficient_returns
+SR_mve_returns <-mean_mve_returns/sd_mve_returns
+SR_optimal_returns <- mean_optimal_returns/sd_optimal_returns
+SR_alabama_returns <- mean_alabama_returns/sd_alabama_returns
+
+B <- rbind(SR_naive_returns, SR_efficient_returns,'NA', SR_alabama_returns, SR_optimal_returns)
+C <- rbind(mean_naive_returns, mean_efficient_returns, mean_mve_returns, mean_alabama_returns,mean_optimal_returns)
+D <- rbind(sd_naive_returns, sd_efficient_returns, sd_mve_returns,sd_alabama_returns,sd_optimal_returns)
+
+new_matrix <- cbind(B, C, D)
+
+colnames(new_matrix) <- c('Sharpe ratio', 'Mean return pct.', 'Std. dev.')
+rownames(new_matrix) <- c('Naive', 'Efficient', 'MVE','MVE -Alabama', 'Optimal')
+```
+
+```{r Ex. 3 Table: display annualized SR, mean and SD for 4 portfolio strategies, cache=FALSE, include=TRUE}
+new_matrix %>% knitr::kable(digits=2, caption = "Annualized characteristics for the 4 strategies") %>%
+  kable_styling(latex_options = "HOLD_position") #kable_styling(latex_options="scale_down") %>%
+```
+First and foremost, the naive portfolio remarkably outperforms all other strategies with a Sharpe ratio of $0.80$. On the surface, the naive portfolio is superior on every aspect. This result points to the fact, that the gains promised by different popular portfolio strategy models (in our case the MVE-, efficient- & optimal portfolio choices) seems difficult to realize out-of-sample. However, it should be noted that the naive portfolio carries no conditions regarding risk aversion and the utility of the investor. The lack of these could be an alleviating factor for the naive portfolio. Nevertheless, it appears that the 3 applied portfolio strategies lack significant explanatory power, especially, when it comes to predicting out-of-sample returns.  
+
+**3.2**) In general when evaluating the performance of specific portfolio strategies, there is a trade-off between the flexibility of the model and estimation uncertainty. In our case, the strategies have zero flexibility, since all strategies have fixed weights, as they are all based upon the full in-sample data set (and not estimated on a rolling-window basis). Thus, estimation uncertainty is minimized at the cost of flexibility, which could hurt the actual performance of the strategies when evaluating out-of-sample performance, since implementation of the in-sample estimates could fall short due to the inflexibility of the fixed weights. Additionally, the fixed weights carry an assumption, that predicts future market movements to be similar to the historical pattern, which could easily be flawed (i.e, how could a shock to global behavior (eg. covid-19) be predicted by historical returns?). Intuitively, in a high-dimensional asset universe, we would expect the naive portfolio to perform less dominantly, since the factor models thrive in high-dimension universes, as estimation errors is minimized when $N \rightarrow T$. Additionally, we would expect the FF3 model to perform better relative to the rest, when $N$ is close to or greater than $T$, since the FF3-model has been proven to explain $90 \%$ of an equity's risk. Implementing transaction costs should skew the performances, such that the naive portfolio is longer the top performer. Intuitively, the 3 other strategies should have less turnover relative to the naive portfolio, as the naive portfolio is subject to rebalancing every period (possibly) for all assets. 
+
+
+
